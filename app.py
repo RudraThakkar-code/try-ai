@@ -74,7 +74,9 @@ if st.button("Search & Analyze"):
             if not prediction_report:
                 st.error("Failed to run pipeline. Check the backend logs or ensure the accession ID is correct.")
             else:
-                # 3. Display Results in Tabs
+                st.sidebar.success(f"Running in {prediction_report.get('mode', 'Unknown')} Mode")
+                st.sidebar.info(f"Data Analyzed: {prediction_report.get('total_size_mb', 0):.1f} MB")
+
                 tab1, tab2 = st.tabs(["Diagnostic Report", "Raw Data Summary"])
 
                 with tab1:

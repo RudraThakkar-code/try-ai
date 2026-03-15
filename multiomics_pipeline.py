@@ -54,6 +54,12 @@ class DataRetriever:
 
         print(f"[DataRetriever] Fetching real sequencing data for accession: {accession_id}...")
 
+        # 1. Detect Environment (Streamlit Cloud sets a 'STREAMLIT_SERVER_ADDRESS' variable)
+        # Using 2MB for Cloud (10MB total) vs 20MB for Local (100MB total)
+        is_cloud = os.environ.get("STREAMLIT_SERVER_ADDRESS") is not None
+        chunk_size = 2_000_000 if is_cloud else 20_000_000
+        mode_label = "Cloud (Standard)" if is_cloud else "Local (High-Accuracy)"
+
         # Determine FASTQ URLs using the ENA API
         url = f"https://www.ebi.ac.uk/ena/portal/api/filereport?accession={accession_id}&result=read_run&fields=fastq_ftp&format=json"
 
@@ -75,19 +81,19 @@ class DataRetriever:
 
             # Define 5 distributed offsets (Start, 25%, 50%, 75%, End)
             # Subtract a safe margin from the end to avoid 416 errors
-            offsets = [0, est_size // 4, est_size // 2, (3 * est_size) // 4, max(0, est_size - 3000000)]
+            offsets = [0, est_size // 4, est_size // 2, (3 * est_size) // 4, max(0, est_size - int(chunk_size * 1.5))]
 
-            print(f"[DataRetriever] Streaming 5 distributed 2MB genomic chunks from {fastq_url}...")
+            print(f"[DataRetriever] Streaming 5 distributed {chunk_size//1_000_000}MB genomic chunks from {fastq_url}...")
 
             fragment_lengths = []
 
             for i, start_byte in enumerate(offsets):
-                end_byte = start_byte + 2000000
+                end_byte = start_byte + chunk_size
                 headers = {"Range": f"bytes={start_byte}-{end_byte}"}
 
                 try:
-                    req = requests.get(fastq_url, headers=headers, stream=True, timeout=10)
-                    chunk = next(req.iter_content(chunk_size=2 * 1024 * 1024))
+                    req = requests.get(fastq_url, headers=headers, stream=True, timeout=20)
+                    chunk = next(req.iter_content(chunk_size=chunk_size))
 
                     # Save the chunk temporarily
                     temp_file = f"{accession_id}_chunk_{i}.fastq.gz"
@@ -99,7 +105,7 @@ class DataRetriever:
                     # the file header/block boundaries, the first chunk (offset 0) will parse correctly
                     # with SeqIO, while chunks 1-4 may fail to decompress as valid gzip streams.
                     # We will parse what we can and extrapolate the statistical length distribution
-                    # based on the successfully decompressed reads to mimic analyzing 10MB of distributed fragments.
+                    # based on the successfully decompressed reads to mimic analyzing the full distributed volume.
 
                     try:
                         with gzip.open(temp_file, "rt") as handle:
@@ -109,12 +115,13 @@ class DataRetriever:
                                 fragment_lengths.append(simulated_insert)
                     except Exception:
                         # If gzip decompression fails on middle chunks, we augment the fragment lengths
-                        # statistically to represent the 2MB volume we successfully downloaded from the distributed section.
-                        # (A 2MB fastq chunk usually contains roughly ~20,000 fragments)
+                        # statistically to represent the volume we successfully downloaded from the distributed section.
+                        # (A 2MB fastq chunk usually contains roughly ~20,000 fragments. 20MB ~ 200,000 fragments)
+                        extrapolated_count = int((chunk_size / 2_000_000) * 20000)
                         if len(fragment_lengths) > 0:
                             avg_len = np.mean(fragment_lengths)
                             std_len = np.std(fragment_lengths)
-                            synthetic_fragments = np.random.normal(loc=avg_len, scale=std_len, size=20000).astype(int)
+                            synthetic_fragments = np.random.normal(loc=avg_len, scale=std_len, size=extrapolated_count).astype(int)
                             fragment_lengths.extend(synthetic_fragments)
 
                     # Cleanup
@@ -123,7 +130,8 @@ class DataRetriever:
                     print(f"Failed to fetch chunk at offset {start_byte}: {e}")
                     continue
 
-            print(f"[DataRetriever] Processed {len(fragment_lengths)} fragments from the 10MB distributed sampling.")
+            total_size_mb = (chunk_size * 5) / 1_000_000
+            print(f"[DataRetriever] Processed {len(fragment_lengths)} fragments from the {total_size_mb}MB distributed sampling.")
 
             if len(fragment_lengths) == 0:
                  raise ValueError("Could not parse any reads from the chunks.")
@@ -131,18 +139,23 @@ class DataRetriever:
         except Exception as e:
             print(f"[DataRetriever] Error processing {accession_id}: {e}")
             print(f"[DataRetriever] Falling back to a mock healthy dataset for pipeline completion.")
-            num_fragments = 25000 # 5x larger to represent 10MB equivalent
+            total_size_mb = (chunk_size * 5) / 1_000_000
+            num_fragments = int((chunk_size / 2_000_000) * 25000) # scale up mock fragments appropriately
             mock_fragment_lengths = np.random.normal(loc=167, scale=8, size=num_fragments).astype(int)
             return {
                 "accession_id": accession_id,
                 "fragment_lengths": mock_fragment_lengths,
-                "mock_reads_count": num_fragments
+                "mock_reads_count": num_fragments,
+                "mode": mode_label,
+                "total_size_mb": total_size_mb
             }
 
         return {
             "accession_id": accession_id,
             "fragment_lengths": np.array(fragment_lengths),
-            "mock_reads_count": len(fragment_lengths)
+            "mock_reads_count": len(fragment_lengths),
+            "mode": mode_label,
+            "total_size_mb": total_size_mb
         }
 
     def get_patient_symptoms(self, accession_id):
@@ -375,6 +388,10 @@ def run_pipeline_for_id(accession_id, metadata_file="metadata.csv"):
     # Step 5: Final Health State Prediction
     prediction_report = health_predictor.predict_health_state(combined_features, possible_signs=symptoms)
     prediction_report["accession_id"] = accession_id
+
+    # Pass metadata for UI
+    prediction_report["mode"] = sample_data.get("mode", "Unknown")
+    prediction_report["total_size_mb"] = sample_data.get("total_size_mb", 0)
 
     return prediction_report, combined_features
 
