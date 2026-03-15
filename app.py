@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 from Bio import Entrez
+from fpdf import FPDF
 from multiomics_pipeline import run_pipeline_for_id
 
 # --- NEW: Database Search Functions ---
@@ -32,6 +33,28 @@ def search_uniprot(accession_id):
         return None
     except Exception:
         return None
+
+def generate_pdf_report(report_data):
+    pdf = FPDF()
+    pdf.add_page()
+
+    # Title
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt="Multi-Omics Diagnostic Report", ln=True, align='C')
+    pdf.ln(10)
+
+    # Body Content
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt=f"Patient ID: {report_data['accession_id']}", ln=True)
+    pdf.cell(200, 10, txt=f"Risk Percentage: {report_data['disease_risk_percentage']}", ln=True)
+    pdf.cell(200, 10, txt=f"Predicted State: {report_data['predicted_disease_type']}", ln=True)
+
+    pdf.ln(5)
+    pdf.cell(200, 10, txt="Biomarkers Detected:", ln=True)
+    for bio in report_data['early_biomarkers']:
+        pdf.cell(200, 10, txt=f"- {bio}", ln=True)
+
+    return pdf.output(dest='S').encode('latin-1')
 
 st.set_page_config(page_title="Multi-Omics Search Portal", layout="wide")
 
@@ -66,6 +89,14 @@ if st.button("Search & Analyze"):
                         "Predicted_Disease_Type": prediction_report["predicted_disease_type"].replace("_", " "),
                         "Early_Biomarkers": prediction_report["early_biomarkers"]
                     })
+
+                    pdf_bytes = generate_pdf_report(prediction_report)
+                    st.download_button(
+                        label="📄 Download PDF Report",
+                        data=pdf_bytes,
+                        file_name=f"report_{accession_id}.pdf",
+                        mime="application/pdf"
+                    )
 
                 with tab2:
                     st.subheader("Microbiome & Physical Symptoms")

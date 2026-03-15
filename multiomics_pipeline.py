@@ -10,6 +10,19 @@ import os
 import random
 import json
 
+def fix_randomness(seed=42):
+    """Locks the randomness so the model always follows the same path."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True # Forces predictable math
+    torch.backends.cudnn.benchmark = False
+
+fix_randomness()
+
 # Mock configuration
 MOCK_DATA_DIR = "./mock_data"
 
@@ -273,12 +286,20 @@ class HealthStatePredictor:
         # If any feature is missing somehow, default to 0
         X_test = np.array([[feature_dict.get(k, 0.0) for k in feature_order]])
 
-        predicted_disease = self.model.predict(X_test)[0]
         risk_probabilities = self.model.predict_proba(X_test)[0]
 
         # Calculate a general "Disease Risk Score" based on the probability of not being healthy
         healthy_index = list(self.model.classes_).index("Healthy")
         disease_risk_score = 1.0 - risk_probabilities[healthy_index]
+
+        # Lower decision threshold: if risk is > 0.5 (50%), predict the most probable disease class
+        # instead of predicting "Healthy" because of a slight overall probability win.
+        if disease_risk_score >= 0.5:
+             # Find the highest probability class that is NOT 'Healthy'
+             disease_probs = {cls: prob for cls, prob in zip(self.model.classes_, risk_probabilities) if cls != "Healthy"}
+             predicted_disease = max(disease_probs, key=disease_probs.get)
+        else:
+             predicted_disease = "Healthy"
 
         # Identify early biomarkers (features driving the prediction)
         # We'll simulate this by picking the top 2 highest anomalous features for the patient
