@@ -22,6 +22,7 @@ def fix_randomness(seed=42):
     torch.backends.cudnn.benchmark = False
 
 fix_randomness()
+torch.set_num_threads(4) # Force CPU threads - stable for standard Intel Core i5
 
 # Mock configuration
 MOCK_DATA_DIR = "./mock_data"
@@ -221,6 +222,9 @@ class CNNInference:
     """
     def __init__(self):
         self.model = SpoolingCNN()
+        # Force CPU usage - most stable for Intel Integrated Graphics
+        self.device = torch.device("cpu")
+        self.model.to(self.device)
         self.model.eval()
         # Since this is a PoC inference script, we just initialize the model randomly
         # In a real setup, we would do: self.model.load_state_dict(torch.load("model_weights.pth"))
@@ -230,6 +234,8 @@ class CNNInference:
         Runs the 1D CNN over the tensor and returns a 'chaotic footprinting score' between 0 and 1.
         """
         print(f"[CNNInference] Running 1D Convolutional Neural Network over fragment tensor...")
+        # Move input data to the CPU device
+        fragment_tensor = fragment_tensor.to(self.device)
         with torch.no_grad():
             output = self.model(fragment_tensor)
             # The network output acts as a CNN feature for chaotic nucleosome footprinting
