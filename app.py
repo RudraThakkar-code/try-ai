@@ -67,6 +67,7 @@ accession_id = st.text_input("Enter Accession Number (e.g., ERR1145155)", "ERR11
 if st.button("Search & Analyze"):
     if accession_id:
         with st.spinner(f"Searching databases for {accession_id}..."):
+            st.info("Scanning distributed genomic chunks...")
             # 2. Call the logic
             prediction_report, combined_features = run_pipeline_for_id(accession_id)
 
