@@ -10,10 +10,14 @@ import os
 import random
 import json
 
-def fix_randomness(seed=42):
-    """Locks the randomness so the model always follows the same path."""
+def hard_lock_environment(seed=42):
+    """Ensures the model is frozen, the math is single-threaded, and the seeds are locked."""
+    # 1. Lock Basic Python & Data Handling
+    os.environ['PYTHONHASHSEED'] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
+
+    # 2. Lock Neural Network Math
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
@@ -21,8 +25,12 @@ def fix_randomness(seed=42):
     torch.backends.cudnn.deterministic = True # Forces predictable math
     torch.backends.cudnn.benchmark = False
 
-fix_randomness()
-torch.set_num_threads(4) # Force CPU threads - stable for standard Intel Core i5
+    torch.set_num_threads(1) # Prevents "Parallel Math" drift
+
+    # 3. Lock Model Behavior
+    torch.set_grad_enabled(False)
+
+hard_lock_environment(42)
 
 # Mock configuration
 MOCK_DATA_DIR = "./mock_data"

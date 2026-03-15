@@ -101,6 +101,18 @@ if st.button("Search & Analyze"):
                         mime="application/pdf"
                     )
 
+                    # Create a link to the ENA browser for the specific sample
+                    ena_link = f"https://www.ebi.ac.uk/ena/browser/view/{accession_id}"
+
+                    # Display the source in the UI
+                    st.subheader("🔗 Source Evidence")
+                    st.markdown(f"""
+Your sample was cross-referenced with the **European Nucleotide Archive (ENA)**.
+* **Accession ID:** `{accession_id}`
+* **Study Reference:** [Project PRJEB6070 - Colorectal Cancer Cohort](https://www.ebi.ac.uk/ena/browser/view/PRJEB6070)
+* **Raw Data Link:** [View full sequencing metadata on ENA]({ena_link})
+                    """)
+
                 with tab2:
                     st.subheader("Microbiome & Physical Symptoms")
                     st.info("Data retrieved from ENA and Metadata CSV.")
