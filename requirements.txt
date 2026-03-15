@@ -1,7 +1,8 @@
-requests
-biopython
+streamlit==1.31.0
+altair==4.2.2
 torch
-scikit-learn
 pandas
 numpy
-streamlit
+scikit-learn
+requests
+biopython

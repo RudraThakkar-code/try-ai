@@ -1,6 +1,37 @@
 import streamlit as st
 import pandas as pd
+import requests
+from Bio import Entrez
 from multiomics_pipeline import run_pipeline_for_id
+
+# --- NEW: Database Search Functions ---
+@st.cache_data
+def search_ncbi(accession_id):
+    """Fetch gene/nucleotide summary from NCBI Entrez."""
+    Entrez.email = "your_email@example.com"  # Required by NCBI
+    try:
+        handle = Entrez.esearch(db="nucleotide", term=accession_id)
+        record = Entrez.read(handle)
+        if record["IdList"]:
+            summary_handle = Entrez.esummary(db="nucleotide", id=record["IdList"][0])
+            summary = Entrez.read(summary_handle)
+            return summary[0]
+        return None
+    except Exception:
+        return None
+
+@st.cache_data
+def search_uniprot(accession_id):
+    """Fetch protein data from UniProt REST API."""
+    url = f"https://rest.uniprot.org/uniprotkb/search?query={accession_id}&format=json"
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            data = response.json()
+            return data['results'][0] if data['results'] else None
+        return None
+    except Exception:
+        return None
 
 st.set_page_config(page_title="Multi-Omics Search Portal", layout="wide")
 
@@ -42,5 +73,30 @@ if st.button("Search & Analyze"):
                     st.write("**Physical Symptoms:**", prediction_report.get("outer_body_accountability", "None"))
                     st.write("**Raw Multi-Omics Feature Matrix:**")
                     st.json(combined_features)
+
+            st.subheader("🌐 Global Database Cross-Reference")
+            ncbi_col, uni_col = st.columns(2)
+
+            with ncbi_col:
+                st.markdown("### NCBI Nucleotide")
+                ncbi_data = search_ncbi(accession_id)
+                if ncbi_data:
+                    st.success(f"Found: {ncbi_data.get('Title', 'No Title')}")
+                    st.write(f"**TaxID:** {ncbi_data.get('TaxId')}")
+                else:
+                    st.warning("No matching record in NCBI.")
+
+            with uni_col:
+                st.markdown("### UniProt (Proteins)")
+                uni_data = search_uniprot(accession_id)
+                if uni_data:
+                    try:
+                        protein_name = uni_data['proteinDescription']['recommendedName']['fullName']['value']
+                        st.success(f"Found: {protein_name}")
+                        st.write(f"**Organism:** {uni_data['organism']['scientificName']}")
+                    except KeyError:
+                         st.success("Found record, but protein description format differs.")
+                else:
+                    st.warning("No matching record in UniProt.")
     else:
         st.warning("Please enter a valid ID.")
