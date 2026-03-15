@@ -15,17 +15,19 @@ MOCK_DATA_DIR = "./mock_data"
 
 class DataRetriever:
     """
-    Simulates fetching and reading sequencing data from a database like MGnify or dbGaP.
+    Fetches real sequencing data from a database like ENA.
     """
-    def __init__(self, metadata_path):
+    def __init__(self, metadata_path=None):
         self.metadata_path = metadata_path
-        self.metadata = self._load_metadata()
+        self.metadata = self._load_metadata() if metadata_path else None
 
     def _load_metadata(self):
         """Loads the metadata CSV containing patient info."""
-        if not os.path.exists(self.metadata_path):
-            raise FileNotFoundError(f"Metadata file not found: {self.metadata_path}")
-        return pd.read_csv(self.metadata_path)
+        if self.metadata_path and os.path.exists(self.metadata_path):
+            return pd.read_csv(self.metadata_path)
+        if self.metadata_path:
+             raise FileNotFoundError(f"Metadata file not found: {self.metadata_path}")
+        return None
 
     def download_sample(self, accession_id):
         """
@@ -112,6 +114,8 @@ class DataRetriever:
         }
 
     def get_patient_symptoms(self, accession_id):
+        if self.metadata is None:
+             return ""
         row = self.metadata[self.metadata["accession_id"] == accession_id]
         if row.empty:
             return ""
