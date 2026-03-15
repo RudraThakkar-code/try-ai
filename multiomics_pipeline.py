@@ -302,6 +302,42 @@ class HealthStatePredictor:
             "outer_body_accountability": possible_signs # The signs inputted initially
         }
 
+def run_pipeline_for_id(accession_id, metadata_file="metadata.csv"):
+    """
+    Wrapper function designed for Streamlit dashboard execution.
+    Runs the entire multi-omics pipeline for a single given Accession ID.
+    Returns the final prediction report and the combined features matrix.
+    """
+    try:
+        data_retriever = DataRetriever(metadata_file)
+    except FileNotFoundError as e:
+        print(e)
+        return None, None
+
+    bio_pipeline = BioinformaticsPipeline()
+    cnn_inference = CNNInference()
+    feature_extractor = MultiOmicsFeatureExtractor()
+    health_predictor = HealthStatePredictor()
+
+    # Step 1: Download sequencing data (Stream from ENA)
+    sample_data = data_retriever.download_sample(accession_id)
+
+    # Step 2: Nucleosome Footprinting Extraction
+    tensor_features, spooling_stats = bio_pipeline.extract_features(sample_data)
+
+    # Step 3: Run CNN Inference
+    cnn_score = cnn_inference.predict(tensor_features)
+
+    # Step 4: Extract Microbiome & Symptom Features
+    symptoms = data_retriever.get_patient_symptoms(accession_id)
+    combined_features = feature_extractor.combine_features(accession_id, spooling_stats, cnn_score, symptoms)
+
+    # Step 5: Final Health State Prediction
+    prediction_report = health_predictor.predict_health_state(combined_features, possible_signs=symptoms)
+    prediction_report["accession_id"] = accession_id
+
+    return prediction_report, combined_features
+
 def run_pipeline(metadata_file="metadata.csv"):
     print("==================================================")
     print(" Starting Multi-Omics Disease Detection Pipeline  ")
@@ -314,11 +350,6 @@ def run_pipeline(metadata_file="metadata.csv"):
         print(e)
         return
 
-    bio_pipeline = BioinformaticsPipeline()
-    cnn_inference = CNNInference()
-    feature_extractor = MultiOmicsFeatureExtractor()
-    health_predictor = HealthStatePredictor()
-
     accessions = data_retriever.metadata["accession_id"].tolist()
 
     all_results = []
@@ -328,28 +359,13 @@ def run_pipeline(metadata_file="metadata.csv"):
         print(f"Processing Patient/Sample: {accession}")
         print(f"--------------------------------------------------")
 
-        # Step 1: Download sequencing data (Mock)
-        sample_data = data_retriever.download_sample(accession)
+        prediction_report, combined_features = run_pipeline_for_id(accession, metadata_file)
 
-        # Step 2: Nucleosome Footprinting Extraction
-        tensor_features, spooling_stats = bio_pipeline.extract_features(sample_data)
-
-        # Step 3: Run CNN Inference
-        cnn_score = cnn_inference.predict(tensor_features)
-
-        # Step 4: Extract Microbiome & Symptom Features
-        symptoms = data_retriever.get_patient_symptoms(accession)
-        combined_features = feature_extractor.combine_features(accession, spooling_stats, cnn_score, symptoms)
-
-        # Step 5: Final Health State Prediction
-        prediction_report = health_predictor.predict_health_state(combined_features, possible_signs=symptoms)
-
-        print("=== Final Diagnostic Report ===")
-        print(json.dumps(prediction_report, indent=4))
-        print("\n")
-
-        prediction_report["accession_id"] = accession
-        all_results.append(prediction_report)
+        if prediction_report:
+            print("=== Final Diagnostic Report ===")
+            print(json.dumps(prediction_report, indent=4))
+            print("\n")
+            all_results.append(prediction_report)
 
     print("==================================================")
     print(" Pipeline Execution Complete ")
