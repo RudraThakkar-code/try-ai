@@ -1,14 +1,15 @@
 import argparse
 import pandas as pd
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import tensorflow as tf
+from tensorflow.keras import layers, models
 from Bio import SeqIO
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
 import os
 import random
 import json
+import shap
 
 def hard_lock_environment(seed=42):
     """Ensures the model is frozen, the math is single-threaded, and the seeds are locked."""
@@ -18,17 +19,9 @@ def hard_lock_environment(seed=42):
     np.random.seed(seed)
 
     # 2. Lock Neural Network Math
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True # Forces predictable math
-    torch.backends.cudnn.benchmark = False
-
-    torch.set_num_threads(1) # Prevents "Parallel Math" drift
-
-    # 3. Lock Model Behavior
-    torch.set_grad_enabled(False)
+    tf.random.set_seed(seed)
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
 
 hard_lock_environment(42)
 
@@ -192,7 +185,8 @@ class BioinformaticsPipeline:
             fragments = np.pad(fragments, (0, self.max_fragments_to_analyze - len(fragments)), mode='constant')
 
         normalized_fragments = (fragments - 160.0) / 30.0
-        tensor_features = torch.tensor(normalized_fragments, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        # Return as (1, 1000, 1) for Keras standard
+        tensor_features = np.expand_dims(np.expand_dims(normalized_fragments, axis=0), axis=-1)
 
         stats = {
             "mean_length": float(np.mean(fragments)),
@@ -203,51 +197,36 @@ class BioinformaticsPipeline:
 
         return tensor_features, stats
 
-class SpoolingCNN(nn.Module):
-    """
-    A 1D CNN to distinguish between healthy (167bp) vs chaotic (145bp) nucleosome spooling patterns.
-    Takes a sequence of fragment lengths and outputs a classification score.
-    """
-    def __init__(self, input_size=1000):
-        super(SpoolingCNN, self).__init__()
-        # Input shape: (Batch, Channels=1, Length=1000)
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=10, stride=5)
-        self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=5, stride=2)
-        self.fc1 = nn.Linear(32 * 98, 64) # Recalculated for input size 1000 with these strided convs
-        self.fc2 = nn.Linear(64, 1) # Outputs a raw logits representing chaotic residue confidence
-
-    def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        x = x.view(x.size(0), -1) # Flatten
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return torch.sigmoid(x)
-
 class CNNInference:
     """
-    Runs inference using the pre-trained (mock) SpoolingCNN.
+    Runs inference using a pre-trained (mock) Spooling CNN built in TensorFlow.
     """
     def __init__(self):
-        self.model = SpoolingCNN()
-        # Force CPU usage - most stable for Intel Integrated Graphics
-        self.device = torch.device("cpu")
-        self.model.to(self.device)
-        self.model.eval()
-        # Since this is a PoC inference script, we just initialize the model randomly
-        # In a real setup, we would do: self.model.load_state_dict(torch.load("model_weights.pth"))
+        # TensorFlow 1D CNN architecture
+        inputs = tf.keras.Input(shape=(1000, 1))
+        x = layers.Conv1D(filters=16, kernel_size=10, strides=5, activation='relu')(inputs)
+        x = layers.Conv1D(filters=32, kernel_size=5, strides=2, activation='relu')(x)
+        x = layers.Flatten()(x)
+        x = layers.Dense(64, activation='relu')(x)
+        outputs = layers.Dense(1, activation='sigmoid')(x)
+
+        self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
+        # Mock initialization compile
+        self.model.compile(optimizer='adam', loss='binary_crossentropy')
 
     def predict(self, fragment_tensor):
         """
         Runs the 1D CNN over the tensor and returns a 'chaotic footprinting score' between 0 and 1.
         """
         print(f"[CNNInference] Running 1D Convolutional Neural Network over fragment tensor...")
-        # Move input data to the CPU device
-        fragment_tensor = fragment_tensor.to(self.device)
-        with torch.no_grad():
-            output = self.model(fragment_tensor)
-            # The network output acts as a CNN feature for chaotic nucleosome footprinting
-            return float(output.item())
+        # Shape: (1, 1000, 1) for TF Conv1D
+        # PyTorch was (1, 1, 1000). Convert the PyTorch-styled tensor if it comes in that shape.
+        tf_input = np.array(fragment_tensor)
+        if len(tf_input.shape) == 3 and tf_input.shape[1] == 1:
+            tf_input = np.transpose(tf_input, (0, 2, 1))
+
+        output = self.model.predict(tf_input, verbose=0)
+        return float(output[0][0])
 
 class MultiOmicsFeatureExtractor:
     """
@@ -283,78 +262,163 @@ class MultiOmicsFeatureExtractor:
         }
         return features
 
+    def generate_chip_filter(self):
+        """Generates mock clonal hematopoiesis of indeterminate potential (CHIP) features."""
+        # Age-related mutations added as noise filters for genomic features
+        dnmt3a = random.uniform(0, 1)
+        tet2 = random.uniform(0, 1)
+        asxl1 = random.uniform(0, 1)
+        # CHIP Filter logical gate
+        threshold = 1.5
+        chip_status = 1 if (dnmt3a + tet2 + asxl1) > threshold else 0
+
+        return {
+            "DNMT3A": dnmt3a,
+            "TET2": tet2,
+            "ASXL1": asxl1,
+            "chip_status": chip_status
+        }
+
     def combine_features(self, accession_id, spooling_stats, cnn_score, symptoms_str):
         microbiome_features = self.extract_microbiome_features(accession_id)
         symptom_features = self.process_symptoms(symptoms_str)
+        chip_features = self.generate_chip_filter()
 
         combined = {}
         combined.update(spooling_stats)
         combined["cnn_spooling_score"] = cnn_score
         combined.update(microbiome_features)
         combined.update(symptom_features)
+        combined.update(chip_features)
 
         return combined
 
-class HealthStatePredictor:
+class MultimodalTensorFlowNet:
     """
-    The final Machine Learning model that predicts the health state, disease risk score, and biological profile.
+    Experimental Multimodal Fusion Architecture based on Keras.
+    Takes independent feature heads for Genomic, Microbial, and Clinical data,
+    concatenates them, and outputs three specific probabilities:
+    Cancer Risk, Microbiome Imbalance, and Metabolic Risk.
     """
     def __init__(self):
-        # We simulate a pre-trained Random Forest model
-        # Normally this would be: self.model = joblib.load("random_forest_model.pkl")
-        self.model = RandomForestClassifier(n_estimators=100, random_state=42)
+        input_cfDNA = tf.keras.Input(shape=(4,), name="cfDNA")
+        x1 = layers.Dense(16, activation='relu')(input_cfDNA)
 
-        # We will train a dummy model just so it has predict() and predict_proba() available
-        # The target classes could be: Healthy, Colorectal Cancer, Inflammatory Bowel Disease
+        input_micro = tf.keras.Input(shape=(3,), name="microbiome")
+        x2 = layers.Dense(16, activation='relu')(input_micro)
+
+        input_clinical = tf.keras.Input(shape=(4,), name="clinical")
+        x3 = layers.Dense(8, activation='relu')(input_clinical)
+
+        merged = layers.concatenate([x1, x2, x3])
+
+        x = layers.Dense(32, activation='relu')(merged)
+        x = layers.Dense(16, activation='relu')(x)
+        x = layers.Dense(8, activation='relu')(x)
+
+        # 3 Multi-output probability targets:
+        # [Cancer Risk, Microbiome Risk, Metabolic Risk]
+        output = layers.Dense(3, activation='sigmoid')(x)
+
+        self.model = tf.keras.Model(
+            inputs=[input_cfDNA, input_micro, input_clinical],
+            outputs=output
+        )
+        self.model.compile(optimizer='adam', loss='binary_crossentropy')
+
+class HealthStatePredictor:
+    """
+    The final Machine Learning model using a Hybrid approach:
+    Baseline Fallback: Random Forest
+    Experimental Primary: Multimodal Deep Fusion Network (TensorFlow)
+    """
+    def __init__(self):
+        # 1. Baseline Model (Random Forest)
+        self.rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
         self.classes = ["Healthy", "Colorectal_Cancer", "Inflammatory_Bowel_Disease"]
-        self._mock_training()
+        self._mock_training_rf()
 
-    def _mock_training(self):
+        # 2. Experimental Primary Model (Multimodal Network)
+        self.tf_model_wrapper = MultimodalTensorFlowNet()
+        self.tf_model = self.tf_model_wrapper.model
+
+        # Keep an explainer built for SHAP using training data
+        # We need a unified input for SHAP to properly interpret it.
+        # However SHAP handles multi-input tf models by taking a list of background data
+        self._build_shap_explainer()
+
+    def _mock_training_rf(self):
         """Creates a dummy pre-trained model for the inference pipeline to use."""
-        # 12 features total (4 spooling + 1 cnn + 3 microbiome + 4 symptoms)
-        dummy_X = np.random.rand(100, 12)
+        # 11 features total (4 spooling + 3 microbiome + 4 symptoms)
+        # Note: Chip Status removed from baseline per original prompt structure
+        dummy_X = np.random.rand(100, 11)
         dummy_y = np.random.choice(self.classes, 100)
-        self.model.fit(dummy_X, dummy_y)
+        self.rf_model.fit(dummy_X, dummy_y)
+
+    def _build_shap_explainer(self):
+        """Builds a DeepExplainer or GradientExplainer for the TF model."""
+        # We simulate background training data to feed SHAP
+        bg_cfdna = np.random.rand(100, 4)
+        bg_micro = np.random.rand(100, 3)
+        bg_clin = np.random.rand(100, 4)
+
+        # DeepExplainer can sometimes be finicky with TF >= 2.0 multi-inputs
+        # In a real setup, GradientExplainer is a bit safer.
+        self.explainer = shap.GradientExplainer(
+             self.tf_model,
+             [bg_cfdna, bg_micro, bg_clin]
+        )
 
     def predict_health_state(self, feature_dict, possible_signs):
         """
         Takes the combined multi-omics feature dictionary and outputs the final prediction.
+        Uses the experimental Keras Multi-Output model as primary, falling back to RF.
         """
-        print(f"[HealthStatePredictor] Running Random Forest classifier on combined biomarker matrix...\n")
+        print(f"[HealthStatePredictor] Running Hybrid Classification Models...")
 
-        # Ensure ordered features to match mock training
+        # --- BASELINE RANDOM FOREST ---
         feature_order = [
-            "mean_length", "std_length", "prop_145bp", "prop_167bp", "cnn_spooling_score",
+            "mean_length", "std_length", "prop_145bp", "prop_167bp",
             "Fusobacterium_nucleatum_abundance", "Bacteroides_fragilis_abundance", "Escherichia_coli_abundance",
             "symp_fatigue", "symp_weight_loss", "symp_pain", "symp_nausea"
         ]
 
-        # If any feature is missing somehow, default to 0
         X_test = np.array([[feature_dict.get(k, 0.0) for k in feature_order]])
+        risk_probabilities = self.rf_model.predict_proba(X_test)[0]
 
-        risk_probabilities = self.model.predict_proba(X_test)[0]
-
-        # Calculate a general "Disease Risk Score" based on the probability of not being healthy
-        healthy_index = list(self.model.classes_).index("Healthy")
-        disease_risk_score = 1.0 - risk_probabilities[healthy_index]
+        healthy_index = list(self.rf_model.classes_).index("Healthy")
+        baseline_rf_risk = 1.0 - risk_probabilities[healthy_index]
 
         # Lower decision threshold: if risk is > 0.5 (50%), predict the most probable disease class
-        # instead of predicting "Healthy" because of a slight overall probability win.
-        if disease_risk_score >= 0.5:
-             # Find the highest probability class that is NOT 'Healthy'
-             disease_probs = {cls: prob for cls, prob in zip(self.model.classes_, risk_probabilities) if cls != "Healthy"}
+        if baseline_rf_risk >= 0.5:
+             disease_probs = {cls: prob for cls, prob in zip(self.rf_model.classes_, risk_probabilities) if cls != "Healthy"}
              predicted_disease = max(disease_probs, key=disease_probs.get)
         else:
              predicted_disease = "Healthy"
 
-        # Identify early biomarkers (features driving the prediction)
-        # We'll simulate this by picking the top 2 highest anomalous features for the patient
-        # Since this is a dummy model, we can't extract realistic SHAP values easily, so we mock this behavior:
+        # --- EXPERIMENTAL PRIMARY MODEL (Multimodal Network) ---
+        # Prepare specific multi-head inputs
+        cfdna_input = np.array([[feature_dict["mean_length"], feature_dict["prop_145bp"], feature_dict["cnn_spooling_score"], feature_dict["chip_status"]]], dtype=np.float32)
+        micro_input = np.array([[feature_dict["Fusobacterium_nucleatum_abundance"], feature_dict["Bacteroides_fragilis_abundance"], feature_dict["Escherichia_coli_abundance"]]], dtype=np.float32)
+        clin_input = np.array([[feature_dict["symp_fatigue"], feature_dict["symp_weight_loss"], feature_dict["symp_pain"], feature_dict["symp_nausea"]]], dtype=np.float32)
+
+        pred = self.tf_model.predict([cfdna_input, micro_input, clin_input], verbose=0)
+
+        tf_cancer_risk = float(pred[0][0])
+        tf_microbiome_risk = float(pred[0][1])
+        tf_metabolic_risk = float(pred[0][2])
+
+        # --- COMBINE & OUTPUT ---
+        # We blend the experimental model with the baseline (e.g. 70% Primary Cancer Risk, 30% Fallback)
+        final_risk_score = (tf_cancer_risk * 0.7) + (baseline_rf_risk * 0.3)
+
         early_biomarkers = []
         if feature_dict["prop_145bp"] > 0.4:
             early_biomarkers.append("High Chaotic 145bp DNA Fragments")
         if feature_dict["Fusobacterium_nucleatum_abundance"] > 0.3:
             early_biomarkers.append("Elevated F. nucleatum Gut Microbiome Abundance")
+        if feature_dict["chip_status"] == 1:
+             early_biomarkers.append("Detected CHIP Mutations (Age-related noise)")
         if feature_dict["cnn_spooling_score"] > 0.6:
             early_biomarkers.append("Anomalous Nucleosome Spooling Motifs")
 
@@ -362,12 +426,16 @@ class HealthStatePredictor:
              early_biomarkers.append("No significant biomarkers detected.")
 
         return {
-            "disease_risk_score": float(disease_risk_score),
-            "disease_risk_percentage": f"{round(disease_risk_score * 100, 2)}%",
+            "disease_risk_score": float(final_risk_score),
+            "disease_risk_percentage": f"{round(final_risk_score * 100, 2)}%",
+            "baseline_rf_score": baseline_rf_risk,
+            "experimental_cancer_risk": tf_cancer_risk,
+            "experimental_microbiome_risk": tf_microbiome_risk,
+            "experimental_metabolic_risk": tf_metabolic_risk,
             "predicted_disease_type": str(predicted_disease),
             "early_biomarkers": early_biomarkers,
-            "outer_body_accountability": possible_signs # The signs inputted initially
-        }
+            "outer_body_accountability": possible_signs
+        }, [cfdna_input, micro_input, clin_input]
 
 def run_pipeline_for_id(accession_id, metadata_file="metadata.csv"):
     """
@@ -400,14 +468,22 @@ def run_pipeline_for_id(accession_id, metadata_file="metadata.csv"):
     combined_features = feature_extractor.combine_features(accession_id, spooling_stats, cnn_score, symptoms)
 
     # Step 5: Final Health State Prediction
-    prediction_report = health_predictor.predict_health_state(combined_features, possible_signs=symptoms)
+    prediction_report, model_inputs = health_predictor.predict_health_state(combined_features, possible_signs=symptoms)
     prediction_report["accession_id"] = accession_id
+
+    # Generate SHAP explanations
+    print(f"[HealthStatePredictor] Generating SHAP explanations...")
+    # Get the shap values for the specific prediction.
+    # GradientExplainer returns a list of arrays (one for each output).
+    # We'll take the explanations for output 0 (Cancer Risk).
+    shap_values = health_predictor.explainer.shap_values(model_inputs)
 
     # Pass metadata for UI
     prediction_report["mode"] = sample_data.get("mode", "Unknown")
     prediction_report["total_size_mb"] = sample_data.get("total_size_mb", 0)
 
-    return prediction_report, combined_features
+    # Return everything needed for the Streamlit UI to plot SHAP
+    return prediction_report, combined_features, shap_values, model_inputs
 
 def run_pipeline(metadata_file="metadata.csv"):
     print("==================================================")
@@ -430,13 +506,14 @@ def run_pipeline(metadata_file="metadata.csv"):
         print(f"Processing Patient/Sample: {accession}")
         print(f"--------------------------------------------------")
 
-        prediction_report, combined_features = run_pipeline_for_id(accession, metadata_file)
+        ret = run_pipeline_for_id(accession, metadata_file)
+        if ret[0] is not None:
+             prediction_report, combined_features, shap_values, model_inputs = ret
 
-        if prediction_report:
-            print("=== Final Diagnostic Report ===")
-            print(json.dumps(prediction_report, indent=4))
-            print("\n")
-            all_results.append(prediction_report)
+             print("=== Final Diagnostic Report ===")
+             print(json.dumps(prediction_report, indent=4))
+             print("\n")
+             all_results.append(prediction_report)
 
     print("==================================================")
     print(" Pipeline Execution Complete ")
